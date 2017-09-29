@@ -508,6 +508,13 @@ namespace Jint
                     return GetValue(completion.Value);
                 }
 
+                var propdesc = value as PropertyDescriptor;
+
+                if (propdesc != null)
+                {
+                    return propdesc.Value;
+                }
+
                 return (JsValue)value;
             }
 
