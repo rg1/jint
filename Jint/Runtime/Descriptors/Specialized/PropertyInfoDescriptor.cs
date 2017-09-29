@@ -17,6 +17,7 @@ namespace Jint.Runtime.Descriptors.Specialized
             _item = item;
 
             Writable = propertyInfo.CanWrite;
+            Enumerable = true;
         }
 
         public override JsValue Value
