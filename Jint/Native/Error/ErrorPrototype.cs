@@ -1,72 +1,67 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.Error
+namespace Jint.Native.Error;
+
+/// <summary>
+/// http://www.ecma-international.org/ecma-262/5.1/#sec-15.11.4
+/// </summary>
+internal sealed class ErrorPrototype : ErrorInstance
 {
-    /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.11.4
-    /// </summary>
-    public sealed class ErrorPrototype : ErrorInstance
+    private readonly JsString _name;
+    private readonly Realm _realm;
+    private readonly ErrorConstructor _constructor;
+
+    internal ErrorPrototype(
+        Engine engine,
+        Realm realm,
+        ErrorConstructor constructor,
+        ObjectInstance prototype,
+        JsString name)
+        : base(engine, ObjectClass.Object)
     {
-        private ErrorPrototype(Engine engine, string name)
-            : base(engine, name)
+        _realm = realm;
+        _name = name;
+        _constructor = constructor;
+        _prototype = prototype;
+    }
+
+    protected override void Initialize()
+    {
+        var properties = new PropertyDictionary(3, checkExistingKeys: false)
         {
+            ["constructor"] = new PropertyDescriptor(_constructor, PropertyFlag.NonEnumerable),
+            ["message"] = new PropertyDescriptor("", PropertyFlag.Configurable | PropertyFlag.Writable),
+            ["name"] = new PropertyDescriptor(_name, PropertyFlag.Configurable | PropertyFlag.Writable),
+            ["toString"] = new PropertyDescriptor(new ClrFunction(Engine, "toString", ToString, 0, PropertyFlag.Configurable), PropertyFlag.Configurable | PropertyFlag.Writable)
+        };
+        SetProperties(properties);
+    }
+
+    public JsValue ToString(JsValue thisObject, JsCallArguments arguments)
+    {
+        var o = thisObject.TryCast<ObjectInstance>();
+        if (o is null)
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
         }
 
-        public static ErrorPrototype CreatePrototypeObject(Engine engine, ErrorConstructor errorConstructor, string name)
+        var nameProp = o.Get("name", this);
+        var name = nameProp.IsUndefined() ? "Error" : TypeConverter.ToString(nameProp);
+
+        var msgProp = o.Get("message", this);
+        string msg = msgProp.IsUndefined() ? "" : TypeConverter.ToString(msgProp);
+
+        if (name == "")
         {
-            var obj = new ErrorPrototype(engine, name) { Extensible = true };
-            obj.FastAddProperty("constructor", errorConstructor, true, false, true);
-            obj.FastAddProperty("message", "", true, false, true);
-
-            if (name != "Error")
-            {
-                obj.Prototype = engine.Error.PrototypeObject;
-            }
-            else
-            {
-                obj.Prototype = engine.Object.PrototypeObject;
-            }
-
-            return obj;
+            return msg;
         }
-
-        public void Configure()
+        if (msg == "")
         {
-            // Error prototype functions
-            FastAddProperty("toString", new ClrFunctionInstance(Engine, ToString), true, false, true);
+            return name;
         }
-
-        public JsValue ToString(JsValue thisObject, JsValue[] arguments)
-        {
-            var o = thisObject.TryCast<ObjectInstance>();
-            if (o == null)
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            var name = TypeConverter.ToString(o.Get("name"));
-
-            var msgProp = o.Get("message");
-            string msg;
-            if (msgProp == Undefined.Instance)
-            {
-                msg = "";
-            }
-            else
-            {
-                msg = TypeConverter.ToString(msgProp);
-            }
-            if (name == "")
-            {
-                return msg;
-            }
-            if (msg == "")
-            {
-                return name;
-            }
-            return name + ": " + msg;
-        }
+        return name + ": " + msg;
     }
 }

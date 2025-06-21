@@ -1,67 +1,67 @@
-﻿using Jint.Native.Function;
+using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
 
-namespace Jint.Native.Boolean
+namespace Jint.Native.Boolean;
+
+internal sealed class BooleanConstructor : Constructor
 {
-    public sealed class BooleanConstructor : FunctionInstance, IConstructor
+    private static readonly JsString _functionName = new JsString("Boolean");
+
+    internal BooleanConstructor(
+        Engine engine,
+        Realm realm,
+        FunctionPrototype functionPrototype,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        private BooleanConstructor(Engine engine): base(engine, null, null, false)
+        _prototype = functionPrototype;
+        PrototypeObject = new BooleanPrototype(engine, realm, this, objectPrototype);
+        _length = new PropertyDescriptor(JsNumber.PositiveOne, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+    }
+
+    public BooleanPrototype PrototypeObject { get; }
+
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (arguments.Length == 0)
         {
+            return false;
         }
 
-        public static BooleanConstructor CreateBooleanConstructor(Engine engine)
+        return TypeConverter.ToBoolean(arguments[0]);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-boolean-constructor-boolean-value
+    /// </summary>
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        var b = TypeConverter.ToBoolean(arguments.At(0))
+            ? JsBoolean.True
+            : JsBoolean.False;
+
+        if (newTarget.IsUndefined())
         {
-            var obj = new BooleanConstructor(engine);
-            obj.Extensible = true;
-
-            // The value of the [[Prototype]] internal property of the Boolean constructor is the Function prototype object 
-            obj.Prototype = engine.Function.PrototypeObject;
-            obj.PrototypeObject = BooleanPrototype.CreatePrototypeObject(engine, obj);
-
-            obj.FastAddProperty("length", 1, false, false, false);
-
-            // The initial value of Boolean.prototype is the Boolean prototype object
-            obj.FastAddProperty("prototype", obj.PrototypeObject, false, false, false);
-
-            return obj;
+            return Construct(b);
         }
 
-        public void Configure()
+        var o = OrdinaryCreateFromConstructor(
+            newTarget,
+            static intrinsics => intrinsics.Boolean.PrototypeObject,
+            static (engine, realm, state) => new BooleanInstance(engine, state!), b);
+        return o;
+    }
+
+    public BooleanInstance Construct(JsBoolean value)
+    {
+        var instance = new BooleanInstance(Engine, value)
         {
+            _prototype = PrototypeObject
+        };
 
-        }
-
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            if (arguments.Length == 0)
-            {
-                return false;
-            }
-
-            return TypeConverter.ToBoolean(arguments[0]);
-        }
-
-        /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.7.2.1
-        /// </summary>
-        /// <param name="arguments"></param>
-        /// <returns></returns>
-        public ObjectInstance Construct(JsValue[] arguments)
-        {
-            return Construct(TypeConverter.ToBoolean(arguments.At(0)));
-        }
-
-        public BooleanPrototype PrototypeObject { get; private set; }
-
-        public BooleanInstance Construct(bool value)
-        {
-            var instance = new BooleanInstance(Engine);
-            instance.Prototype = PrototypeObject;
-            instance.PrimitiveValue = value;
-            instance.Extensible = true;
-
-            return instance;
-        }
+        return instance;
     }
 }

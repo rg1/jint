@@ -1,123 +1,154 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using Jint.Native;
 using Jint.Native.Error;
-using Jint.Parser;
-using Jint.Parser.Ast;
-using Jint.Runtime.CallStack;
+using Jint.Native.Object;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Runtime
+namespace Jint.Runtime;
+
+public class JavaScriptException : JintException
 {
-    public class JavaScriptException : Exception
+    private static string? GetMessage(JsValue? error)
     {
-        private readonly JsValue _errorObject;
-        private string _callStack;
-
-        public JavaScriptException(ErrorConstructor errorConstructor) : base("")
+        string? ret = null;
+        if (error is ObjectInstance oi)
         {
-            _errorObject = errorConstructor.Construct(Arguments.Empty);
+            ret = oi.Get(CommonProperties.Message).ToString();
+        }
+        else if (error is not null)
+        {
+            ret = error.IsSymbol() ? error.ToString() : TypeConverter.ToString(error);
         }
 
-        public JavaScriptException(ErrorConstructor errorConstructor, string message)
-            : base(message)
+        return ret;
+    }
+
+    private readonly JavaScriptErrorWrapperException _jsErrorException;
+
+    public string? JavaScriptStackTrace => _jsErrorException.StackTrace;
+    public ref readonly SourceLocation Location => ref _jsErrorException.Location;
+    public JsValue Error => _jsErrorException.Error;
+
+    internal JavaScriptException(ErrorConstructor errorConstructor)
+        : base("", new JavaScriptErrorWrapperException(errorConstructor.Construct(), ""))
+    {
+        _jsErrorException = (JavaScriptErrorWrapperException) InnerException!;
+    }
+
+    public JavaScriptException(ErrorConstructor errorConstructor, string? message = null)
+        : base(message, new JavaScriptErrorWrapperException(errorConstructor.Construct(message), message))
+    {
+        _jsErrorException = (JavaScriptErrorWrapperException) InnerException!;
+    }
+
+    public JavaScriptException(JsValue error)
+        : base(GetMessage(error), new JavaScriptErrorWrapperException(error, GetMessage(error)))
+    {
+        _jsErrorException = (JavaScriptErrorWrapperException) InnerException!;
+    }
+
+    public string GetJavaScriptErrorString() => _jsErrorException.ToString();
+
+    public JavaScriptException SetJavaScriptCallstack(Engine engine, in SourceLocation location, bool overwriteExisting = false)
+    {
+        _jsErrorException.SetCallstack(engine, location, overwriteExisting);
+        return this;
+    }
+
+    public JavaScriptException SetJavaScriptLocation(in SourceLocation location)
+    {
+        _jsErrorException.SetLocation(location);
+        return this;
+    }
+
+    private sealed class JavaScriptErrorWrapperException : JintException
+    {
+        private string? _callStack;
+        private SourceLocation _location;
+
+        internal JavaScriptErrorWrapperException(JsValue error, string? message = null)
+            : base(message ?? GetMessage(error))
         {
-            _errorObject = errorConstructor.Construct(new JsValue[] { message });
+            Error = error;
         }
 
-        public JavaScriptException(JsValue error)
-            : base(GetErrorMessage(error))
+        public JsValue Error { get; }
+
+        public ref readonly SourceLocation Location => ref _location;
+
+        internal void SetLocation(in SourceLocation location)
         {
-            _errorObject = error;
+            _location = location;
         }
 
-        public JavaScriptException SetCallstack(Engine engine, Location location = null)
+        internal void SetCallstack(Engine engine, in SourceLocation location, bool overwriteExisting)
         {
-            Location = location;
-            var sb = new StringBuilder();
-            foreach (var cse in engine.CallStack)
+            _location = location;
+
+            var errObj = Error.IsObject() ? Error.AsObject() : null;
+            if (errObj is null)
             {
-                sb.Append(" at ")
-                    .Append(cse)
-                    .Append("(");
-
-                for (var index = 0; index < cse.CallExpression.Arguments.Count; index++)
-                {
-                    if (index != 0)
-                        sb.Append(", ");
-                    var arg = cse.CallExpression.Arguments[index];
-                    if (arg is IPropertyKeyExpression pke)
-                        sb.Append(pke.GetKey());
-                    else
-                        sb.Append(arg);
-                }
-
-
-                sb.Append(") @ ")
-                    .Append(cse.CallExpression.Location.Source)
-                    .Append(" ")
-                    .Append(cse.CallExpression.Location.Start.Column)
-                    .Append(":")
-                    .Append(cse.CallExpression.Location.Start.Line)
-                    .AppendLine();
+                _callStack = engine.CallStack.BuildCallStackString(engine, location);
+                return;
             }
-            CallStack = sb.ToString();
-            return this;
-        }
 
-        private static string GetErrorMessage(JsValue error) 
-        {
-            if (error.IsObject())
+            // Does the Error object already have a stack property?
+            if (errObj.HasProperty(CommonProperties.Stack) && !overwriteExisting)
             {
-                var oi = error.AsObject();
-                var message = oi.Get("message").AsString();
-                return message;
+                _callStack = errObj.Get(CommonProperties.Stack).AsString();
             }
-            if (error.IsString())
-                return error.AsString();
-            
-            return error.ToString();
+            else
+            {
+                _callStack = engine.CallStack.BuildCallStackString(engine, location);
+                errObj.FastSetProperty(CommonProperties.Stack._value, new PropertyDescriptor(_callStack, false, false, false));
+            }
         }
 
-        public JsValue Error { get { return _errorObject; } }
-
-        public override string ToString()
-        {
-            return _errorObject.ToString();
-        }
-
-        public string CallStack
+        /// <summary>
+        /// Returns the call stack of the JavaScript exception.
+        /// </summary>
+        public override string? StackTrace
         {
             get
             {
-                if (_callStack != null)
-                    return _callStack;
-                if (_errorObject == null)
-                    return null;
-                if (_errorObject.IsObject() == false)
-                    return null;
-                var callstack = _errorObject.AsObject().Get("callstack");
-                if (callstack == JsValue.Undefined)
-                    return null;
-                return callstack.AsString();
-            }
-            set
-            {
-                _callStack = value;
-                if (value != null && _errorObject.IsObject())
+                if (_callStack is not null)
                 {
-                    _errorObject.AsObject()
-                        .FastAddProperty("callstack", new JsValue(value), false, false, false);
+                    return _callStack;
                 }
+
+                if (Error is not ObjectInstance oi)
+                {
+                    return null;
+                }
+
+                var callstack = oi.Get(CommonProperties.Stack, Error);
+
+                return callstack.IsUndefined()
+                    ? null
+                    : callstack.AsString();
             }
         }
 
-        public Jint.Parser.Location Location { get; set; }
+        public override string ToString()
+        {
+            var sb = new ValueStringBuilder();
 
-        public int LineNumber { get { return null == Location ? 0 : Location.Start.Line; } }
+            sb.Append("Error");
+            var message = Message;
+            if (!string.IsNullOrEmpty(message))
+            {
+                sb.Append(": ");
+                sb.Append(message);
+            }
 
-        public int Column { get { return null == Location ? 0 : Location.Start.Column; } }
+            var stackTrace = StackTrace;
+            if (stackTrace != null)
+            {
+                sb.Append(Environment.NewLine);
+                sb.Append(stackTrace);
+            }
+
+            return sb.ToString();
+        }
     }
 }

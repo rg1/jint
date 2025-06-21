@@ -1,76 +1,129 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Native.String
+namespace Jint.Native.String;
+
+internal class StringInstance : ObjectInstance, IJsPrimitive
 {
-    public class StringInstance : ObjectInstance, IPrimitiveInstance
+    internal PropertyDescriptor? _length;
+
+    public StringInstance(Engine engine, JsString value)
+        : base(engine, ObjectClass.String)
     {
-        public StringInstance(Engine engine)
-            : base(engine)
+        StringData = value;
+        _length = PropertyDescriptor.AllForbiddenDescriptor.ForNumber(value.Length);
+    }
+
+    Types IJsPrimitive.Type => Types.String;
+
+    JsValue IJsPrimitive.PrimitiveValue => StringData;
+
+    public JsString StringData { get; }
+
+    private static bool IsInt32(double d, out int intValue)
+    {
+        if (d >= int.MinValue && d <= int.MaxValue)
         {
+            intValue = (int) d;
+            return intValue == d;
         }
 
-        public override string Class
+        intValue = 0;
+        return false;
+    }
+
+    public sealed override PropertyDescriptor GetOwnProperty(JsValue property)
+    {
+        if (CommonProperties.Infinity.Equals(property))
         {
-            get
+            return PropertyDescriptor.Undefined;
+        }
+
+        if (CommonProperties.Length.Equals(property))
+        {
+            return _length ?? PropertyDescriptor.Undefined;
+        }
+
+        var desc = base.GetOwnProperty(property);
+        if (desc != PropertyDescriptor.Undefined)
+        {
+            return desc;
+        }
+
+        if ((property._type & (InternalTypes.Number | InternalTypes.Integer | InternalTypes.String)) == InternalTypes.Empty)
+        {
+            return PropertyDescriptor.Undefined;
+        }
+
+        var str = StringData.ToString();
+        var number = TypeConverter.ToNumber(property);
+        if (!IsInt32(number, out var index) || index < 0 || index >= str.Length)
+        {
+            return PropertyDescriptor.Undefined;
+        }
+
+        return new PropertyDescriptor(str[index], PropertyFlag.OnlyEnumerable);
+    }
+
+    public sealed override IEnumerable<KeyValuePair<JsValue, PropertyDescriptor>> GetOwnProperties()
+    {
+        foreach (var entry in base.GetOwnProperties())
+        {
+            yield return entry;
+        }
+
+        if (_length != null)
+        {
+            yield return new KeyValuePair<JsValue, PropertyDescriptor>(CommonProperties.Length, _length);
+        }
+    }
+
+    internal sealed override IEnumerable<JsValue> GetInitialOwnStringPropertyKeys()
+    {
+        yield return JsString.LengthString;
+    }
+
+    public sealed override List<JsValue> GetOwnPropertyKeys(Types types = Types.String | Types.Symbol)
+    {
+        var keys = new List<JsValue>(StringData.Length + 1);
+        if ((types & Types.String) != Types.Empty)
+        {
+            for (uint i = 0; i < StringData.Length; ++i)
             {
-                return "String";
+                keys.Add(JsString.Create(i));
             }
+
+            keys.AddRange(base.GetOwnPropertyKeys(Types.String));
         }
 
-        Types IPrimitiveInstance.Type
+        if ((types & Types.Symbol) != Types.Empty)
         {
-            get { return Types.String; }
+            keys.AddRange(base.GetOwnPropertyKeys(Types.Symbol));
         }
 
-        JsValue IPrimitiveInstance.PrimitiveValue
+        return keys;
+    }
+
+    protected internal sealed override void SetOwnProperty(JsValue property, PropertyDescriptor desc)
+    {
+        if (CommonProperties.Length.Equals(property))
         {
-            get { return PrimitiveValue; }
+            _length = desc;
         }
-
-        public JsValue PrimitiveValue { get; set; }
-
-        private static bool IsInt(double d)
+        else
         {
-            if (d >= long.MinValue && d <= long.MaxValue)
-            {
-                var l = (long)d;
-                return l >= int.MinValue && l <= int.MaxValue;
-            }
-            else 
-                return false;
+            base.SetOwnProperty(property, desc);
         }
+    }
 
-        public override PropertyDescriptor GetOwnProperty(string propertyName)
+    public sealed override void RemoveOwnProperty(JsValue property)
+    {
+        if (CommonProperties.Length.Equals(property))
         {
-            if(propertyName == "Infinity")
-                return PropertyDescriptor.Undefined;
-
-            var desc = base.GetOwnProperty(propertyName);
-            if (desc != PropertyDescriptor.Undefined)
-            {
-                return desc;
-            }
-
-            if (propertyName != System.Math.Abs(TypeConverter.ToInteger(propertyName)).ToString())
-            {
-                return PropertyDescriptor.Undefined;
-            }
-
-            var str = PrimitiveValue;
-            var dIndex = TypeConverter.ToInteger(propertyName);
-            if(!IsInt(dIndex))
-                return PropertyDescriptor.Undefined;
-
-            var index = (int)dIndex;
-            var len = str.AsString().Length;
-            if (len <= index || index < 0)
-            {
-                return PropertyDescriptor.Undefined;
-            }
-            var resultStr = str.AsString()[index].ToString();
-            return new PropertyDescriptor(new JsValue(resultStr), false, true, false);
+            _length = null;
         }
+
+        base.RemoveOwnProperty(property);
     }
 }

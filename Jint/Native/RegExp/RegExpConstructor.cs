@@ -1,237 +1,157 @@
-﻿using System;
 using System.Text.RegularExpressions;
 using Jint.Native.Function;
 using Jint.Native.Object;
+using Jint.Native.Symbol;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
+using Jint.Runtime.Interop;
 
-namespace Jint.Native.RegExp
+namespace Jint.Native.RegExp;
+
+public sealed class RegExpConstructor : Constructor
 {
-    public sealed class RegExpConstructor : FunctionInstance, IConstructor
+    private static readonly JsString _functionName = new JsString("RegExp");
+
+    internal RegExpConstructor(
+        Engine engine,
+        Realm realm,
+        FunctionPrototype functionPrototype,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        public RegExpConstructor(Engine engine)
-            : base(engine, null, null, false)
+        _prototype = functionPrototype;
+        PrototypeObject = new RegExpPrototype(engine, realm, this, objectPrototype);
+        _length = new PropertyDescriptor(2, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+    }
+
+    internal RegExpPrototype PrototypeObject { get; }
+
+    protected override void Initialize()
+    {
+        var symbols = new SymbolDictionary(1)
         {
+            [GlobalSymbolRegistry.Species] = new GetSetPropertyDescriptor(get: new ClrFunction(_engine, "get [Symbol.species]", (thisObj, _) => thisObj, 0, PropertyFlag.Configurable), set: Undefined, PropertyFlag.Configurable)
+        };
+        SetSymbols(symbols);
+    }
+
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        return Construct(arguments, thisObject);
+    }
+
+    public ObjectInstance Construct(JsCallArguments arguments)
+    {
+        return Construct(arguments, this);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-regexp-pattern-flags
+    /// </summary>
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        var pattern = arguments.At(0);
+        var flags = arguments.At(1);
+
+        var patternIsRegExp = pattern.IsRegExp();
+        if (newTarget.IsUndefined())
+        {
+            newTarget = this;
+            if (patternIsRegExp && flags.IsUndefined())
+            {
+                var patternConstructor = pattern.Get(CommonProperties.Constructor);
+                if (ReferenceEquals(newTarget, patternConstructor))
+                {
+                    return (ObjectInstance) pattern;
+                }
+            }
         }
 
-        public static RegExpConstructor CreateRegExpConstructor(Engine engine)
+        JsValue p;
+        JsValue f;
+        if (pattern is JsRegExp regExpInstance)
         {
-            var obj = new RegExpConstructor(engine);
-            obj.Extensible = true;
-
-            // The value of the [[Prototype]] internal property of the RegExp constructor is the Function prototype object 
-            obj.Prototype = engine.Function.PrototypeObject;
-            obj.PrototypeObject = RegExpPrototype.CreatePrototypeObject(engine, obj);
-
-            obj.FastAddProperty("length", 2, false, false, false);
-
-            // The initial value of RegExp.prototype is the RegExp prototype object
-            obj.FastAddProperty("prototype", obj.PrototypeObject, false, false, false);
-
-            return obj;
+            p = regExpInstance.Source;
+            f = flags.IsUndefined() ? regExpInstance.Flags : flags;
+        }
+        else if (patternIsRegExp)
+        {
+            p = pattern.Get(RegExpPrototype.PropertySource);
+            f = flags.IsUndefined() ? pattern.Get(RegExpPrototype.PropertyFlags) : flags;
+        }
+        else
+        {
+            p = pattern;
+            f = flags;
         }
 
-        public void Configure()
+        var r = RegExpAlloc(newTarget);
+        return RegExpInitialize(r, p, f);
+    }
+
+    private JsRegExp RegExpInitialize(JsRegExp r, JsValue pattern, JsValue flags)
+    {
+        var p = pattern.IsUndefined() ? "" : TypeConverter.ToString(pattern);
+        if (string.IsNullOrEmpty(p))
         {
+            p = "(?:)";
         }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            var pattern = arguments.At(0);
-            var flags = arguments.At(1);
+        var f = flags.IsUndefined() ? "" : TypeConverter.ToString(flags);
 
-            if (pattern != Undefined.Instance && flags == Undefined.Instance && TypeConverter.ToObject(Engine, pattern).Class == "Regex")
+        var parserOptions = _engine.GetActiveParserOptions();
+        try
+        {
+            var regExpParseResult = Tokenizer.AdaptRegExp(p, f, compiled: false, parserOptions.RegexTimeout,
+                ecmaVersion: parserOptions.EcmaVersion,
+                experimentalESFeatures: parserOptions.ExperimentalESFeatures);
+
+            if (!regExpParseResult.Success)
             {
-                return pattern;
+                ExceptionHelper.ThrowSyntaxError(_realm, $"Unsupported regular expression. {regExpParseResult.ConversionError!.Description}");
             }
 
-            return Construct(arguments);
+            r.Value = regExpParseResult.Regex!;
+            r.ParseResult = regExpParseResult;
+        }
+        catch (Exception ex)
+        {
+            ExceptionHelper.ThrowSyntaxError(_realm, ex.Message);
         }
 
-        /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-7.8.5
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.10.4
-        /// </summary>
-        /// <param name="arguments"></param>
-        /// <returns></returns>
-        public ObjectInstance Construct(JsValue[] arguments)
-        {
-            string p;
-            string f;
+        r.Flags = f;
+        r.Source = p;
 
-            var pattern = arguments.At(0);
-            var flags = arguments.At(1);
+        RegExpInitialize(r);
 
-            var r = pattern.TryCast<RegExpInstance>();
-            if (flags == Undefined.Instance && r != null)
-            {
-                return r;
-            }
-            else if (flags != Undefined.Instance && r != null)
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-            else
-            {
-                if (pattern == Undefined.Instance)
-                {
-                    p = "";
+        return r;
+    }
 
-                }
-                else
-                {
-                    p = TypeConverter.ToString(pattern);
-                }
-                
-                f = flags != Undefined.Instance ? TypeConverter.ToString(flags) : "";
-            }
+    private JsRegExp RegExpAlloc(JsValue newTarget)
+    {
+        var r = OrdinaryCreateFromConstructor(
+            newTarget,
+            static intrinsics => intrinsics.RegExp.PrototypeObject,
+            static (Engine engine, Realm _, object? _) => new JsRegExp(engine));
+        return r;
+    }
 
-            r = new RegExpInstance(Engine);
-            r.Prototype = PrototypeObject;
-            r.Extensible = true;
+    public JsRegExp Construct(Regex regExp, string source, string flags, RegExpParseResult regExpParseResult = default)
+    {
+        var r = RegExpAlloc(this);
+        r.Value = regExp;
+        r.Source = source;
+        r.Flags = flags;
+        r.ParseResult = regExpParseResult;
 
-            var options = ParseOptions(r, f);
+        RegExpInitialize(r);
 
-            try
-            {
-                r.Value = new Regex(p, options);
-            }
-            catch (Exception e)
-            {
-                throw new JavaScriptException(Engine.SyntaxError, e.Message);
-            }
+        return r;
+    }
 
-            string s;
-            s = p;
-             
-            if (System.String.IsNullOrEmpty(s))
-            {
-                s = "(?:)";
-            }
-
-            r.Flags = f;
-            r.Source = s;
-
-            r.FastAddProperty("global", r.Global, false, false, false);
-            r.FastAddProperty("ignoreCase", r.IgnoreCase, false, false, false);
-            r.FastAddProperty("multiline", r.Multiline, false, false, false);
-            r.FastAddProperty("source", r.Source, false, false, false);
-            r.FastAddProperty("lastIndex", 0, true, false, false);
-
-            return r;
-        }
-
-        public RegExpInstance Construct(string regExp)
-        {
-            var r = new RegExpInstance(Engine);
-            r.Prototype = PrototypeObject;
-            r.Extensible = true;
- 
-            if (regExp[0] != '/')
-            {
-                throw new JavaScriptException(Engine.SyntaxError, "Regexp should start with slash");
-            }
-            var lastSlash = regExp.LastIndexOf('/');
-            // Unescape escaped forward slashes (\/)
-            var pattern = regExp.Substring(1, lastSlash - 1).Replace("\\/", "/");
-            var flags = regExp.Substring(lastSlash + 1);
-
-            var options = ParseOptions(r, flags);
-            try
-            {
-                if((RegexOptions.Multiline & options) == RegexOptions.Multiline)
-                {
-                    // Replace all non-escaped $ occurences by \r?$
-                    // c.f. http://programmaticallyspeaking.com/regular-expression-multiline-mode-whats-a-newline.html
-
-                    int index = 0;
-                    var newPattern = pattern;
-                    while((index = newPattern.IndexOf("$", index)) != -1)
-                    {
-                        if(index > 0 && newPattern[index - 1] != '\\')
-                        {
-                            newPattern = newPattern.Substring(0, index) + @"\r?" + newPattern.Substring(index);
-                            index += 4;
-                        }
-                    }
-
-                    r.Value = new Regex(newPattern, options);
-                }
-                else
-                {
-                    r.Value = new Regex(pattern, options);
-                }
-                
-            }
-            catch (Exception e)
-            {
-                throw new JavaScriptException(Engine.SyntaxError, e.Message);
-            }
-
-            r.Flags = flags;
-            r.Source = System.String.IsNullOrEmpty(pattern) ? "(?:)" : pattern;
-
-            r.FastAddProperty("global", r.Global, false, false, false);
-            r.FastAddProperty("ignoreCase", r.IgnoreCase, false, false, false);
-            r.FastAddProperty("multiline", r.Multiline, false, false, false);
-            r.FastAddProperty("source", r.Source, false, false, false);
-            r.FastAddProperty("lastIndex", 0, true, false, false);
-
-            return r;
-        }
-
-        private RegexOptions ParseOptions(RegExpInstance r, string flags)
-        {
-            for (int k = 0; k < flags.Length; k++)
-            {
-                var c = flags[k];
-                if (c == 'g')
-                {
-                    if (r.Global)
-                    {
-                        throw new JavaScriptException(Engine.SyntaxError);
-                    }
-
-                    r.Global = true;
-                }
-                else if (c == 'i')
-                {
-                    if (r.IgnoreCase)
-                    {
-                        throw new JavaScriptException(Engine.SyntaxError);
-                    }
-
-                    r.IgnoreCase = true;
-                }
-                else if (c == 'm')
-                {
-                    if (r.Multiline)
-                    {
-                        throw new JavaScriptException(Engine.SyntaxError);
-                    }
-
-                    r.Multiline = true;
-                }
-                else
-                {
-                    throw new JavaScriptException(Engine.SyntaxError);
-                }
-            }
-
-            var options = RegexOptions.ECMAScript;
-
-            if (r.Multiline)
-            {
-                options = options | RegexOptions.Multiline;
-            }
-
-            if (r.IgnoreCase)
-            {
-                options = options | RegexOptions.IgnoreCase;
-            }
-
-            return options;
-        }
-
-        public RegExpPrototype PrototypeObject { get; private set; }
+    private static void RegExpInitialize(JsRegExp r)
+    {
+        r.SetOwnProperty(JsRegExp.PropertyLastIndex, new PropertyDescriptor(0, PropertyFlag.OnlyWritable));
     }
 }

@@ -1,14 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿namespace Jint.Tests.Runtime.Domain;
 
-namespace Jint.Tests.Runtime.Domain
+public interface IPerson
 {
-    public interface IPerson
-    {
-        string Name { get; }
-    }
-
+    string Name { get; }
 }

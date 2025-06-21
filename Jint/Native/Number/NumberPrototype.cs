@@ -1,337 +1,535 @@
-﻿using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using Jint.Native.Number.Dtoa;
+using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.Number
+namespace Jint.Native.Number;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-properties-of-the-number-prototype-object
+/// </summary>
+internal sealed class NumberPrototype : NumberInstance
 {
-    /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.7.4
-    /// </summary>
-    public sealed class NumberPrototype : NumberInstance
+    private const int SmallDtoaLength = FastDtoa.KFastDtoaMaximalLength + 8;
+    private const int LargeDtoaLength = 101;
+
+    private readonly Realm _realm;
+    private readonly NumberConstructor _constructor;
+
+    internal NumberPrototype(
+        Engine engine,
+        Realm realm,
+        NumberConstructor constructor,
+        ObjectPrototype objectPrototype)
+        : base(engine, InternalTypes.Object | InternalTypes.PlainObject)
     {
-        private NumberPrototype(Engine engine)
-            : base(engine)
+        _prototype = objectPrototype;
+        _realm = realm;
+        _constructor = constructor;
+    }
+
+    protected override void Initialize()
+    {
+        var properties = new PropertyDictionary(8, checkExistingKeys: false)
         {
+            ["constructor"] = new PropertyDescriptor(_constructor, true, false, true),
+            ["toString"] = new PropertyDescriptor(new ClrFunction(Engine, "toString", ToNumberString, 1, PropertyFlag.Configurable), true, false, true),
+            ["toLocaleString"] = new PropertyDescriptor(new ClrFunction(Engine, "toLocaleString", ToLocaleString, 0, PropertyFlag.Configurable), true, false, true),
+            ["valueOf"] = new PropertyDescriptor(new ClrFunction(Engine, "valueOf", ValueOf, 0, PropertyFlag.Configurable), true, false, true),
+            ["toFixed"] = new PropertyDescriptor(new ClrFunction(Engine, "toFixed", ToFixed, 1, PropertyFlag.Configurable), true, false, true),
+            ["toExponential"] = new PropertyDescriptor(new ClrFunction(Engine, "toExponential", ToExponential, 1, PropertyFlag.Configurable), true, false, true),
+            ["toPrecision"] = new PropertyDescriptor(new ClrFunction(Engine, "toPrecision", ToPrecision, 1, PropertyFlag.Configurable), true, false, true)
+        };
+        SetProperties(properties);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-number.prototype.tolocalestring
+    /// </summary>
+    private JsValue ToLocaleString(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (!thisObject.IsNumber() && thisObject is not NumberInstance)
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
         }
 
-        public static NumberPrototype CreatePrototypeObject(Engine engine, NumberConstructor numberConstructor)
+        var m = TypeConverter.ToNumber(thisObject);
+
+        if (double.IsNaN(m))
         {
-            var obj = new NumberPrototype(engine);
-            obj.Prototype = engine.Object.PrototypeObject;
-            obj.PrimitiveValue = 0;
-            obj.Extensible = true;
-
-            obj.FastAddProperty("constructor", numberConstructor, true, false, true);
-
-            return obj;
+            return "NaN";
         }
 
-        public void Configure()
+        if (m == 0)
         {
-            FastAddProperty("toString", new ClrFunctionInstance(Engine, ToNumberString), true, false, true);
-            FastAddProperty("toLocaleString", new ClrFunctionInstance(Engine, ToLocaleString), true, false, true);
-            FastAddProperty("valueOf", new ClrFunctionInstance(Engine, ValueOf), true, false, true);
-            FastAddProperty("toFixed", new ClrFunctionInstance(Engine, ToFixed, 1), true, false, true);
-            FastAddProperty("toExponential", new ClrFunctionInstance(Engine, ToExponential), true, false, true);
-            FastAddProperty("toPrecision", new ClrFunctionInstance(Engine, ToPrecision), true, false, true);
+            return JsString.NumberZeroString;
         }
 
-        private JsValue ToLocaleString(JsValue thisObject, JsValue[] arguments)
+        if (m < 0)
         {
-            if (!thisObject.IsNumber() && (thisObject.TryCast<NumberInstance>() == null))
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            var m = TypeConverter.ToNumber(thisObject);
-
-            if (double.IsNaN(m))
-            {
-                return "NaN";
-            }
-
-            if (m.Equals(0))
-            {
-                return "0";
-            }
-
-            if (m < 0)
-            {
-                return "-" + ToLocaleString(-m, arguments);
-            }
-
-            if (double.IsPositiveInfinity(m) || m >= double.MaxValue)
-            {
-                return "Infinity";
-            }
-
-            if (double.IsNegativeInfinity(m) || m <= -double.MaxValue)
-            {
-                return "-Infinity";
-            }
-
-            return m.ToString("n", Engine.Options._Culture);
+            return "-" + ToLocaleString(-m, arguments);
         }
 
-        private JsValue ValueOf(JsValue thisObj, JsValue[] arguments)
+        if (double.IsPositiveInfinity(m) || m >= double.MaxValue)
         {
-            var number = thisObj.TryCast<NumberInstance>();
-            if (number == null)
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            return number.PrimitiveValue;
+            return "Infinity";
         }
 
-        private const double Ten21 = 1e21;
-
-        private JsValue ToFixed(JsValue thisObj, JsValue[] arguments)
+        if (double.IsNegativeInfinity(m) || m <= -double.MaxValue)
         {
-            var f = (int)TypeConverter.ToInteger(arguments.At(0, 0));
-            if (f < 0 || f > 20)
-            {
-                throw new JavaScriptException(Engine.RangeError, "fractionDigits argument must be between 0 and 20");
-            }
-
-            var x = TypeConverter.ToNumber(thisObj);
-
-            if (double.IsNaN(x))
-            {
-                return "NaN";
-            }
-
-            if (x >= Ten21)
-            {
-                return ToNumberString(x);
-            }
-
-            return x.ToString("f" + f, CultureInfo.InvariantCulture);
+            return "-Infinity";
         }
 
-        private JsValue ToExponential(JsValue thisObj, JsValue[] arguments)
+        var numberFormat = (NumberFormatInfo) Engine.Options.Culture.NumberFormat.Clone();
+
+        try
         {
-            var f = (int)TypeConverter.ToInteger(arguments.At(0, 16));
-            if (f < 0 || f > 20)
+            if (arguments.Length > 0 && arguments[0].IsString())
             {
-                throw new JavaScriptException(Engine.RangeError, "fractionDigits argument must be between 0 and 20");
+                var cultureArgument = arguments[0].ToString();
+                numberFormat = (NumberFormatInfo) CultureInfo.GetCultureInfo(cultureArgument).NumberFormat.Clone();
             }
 
-            var x = TypeConverter.ToNumber(thisObj);
-
-            if (double.IsNaN(x))
-            {
-                return "NaN";
-            }
-
-            string format = System.String.Concat("#.", new System.String('0', f), "e+0");
-            return x.ToString(format, CultureInfo.InvariantCulture);
+            int decDigitCount = NumberIntlHelper.GetDecimalDigitCount(m);
+            numberFormat.NumberDecimalDigits = decDigitCount;
+        }
+        catch (CultureNotFoundException)
+        {
+            ExceptionHelper.ThrowRangeError(_realm, "Incorrect locale information provided");
         }
 
-        private JsValue ToPrecision(JsValue thisObj, JsValue[] arguments)
+        return m.ToString("n", numberFormat);
+    }
+
+    private JsValue ValueOf(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (thisObject is NumberInstance ni)
         {
-            var x = TypeConverter.ToNumber(thisObj);
-
-            if (arguments.At(0) == Undefined.Instance)
-            {
-                return TypeConverter.ToString(x);
-            }
-
-            var p = TypeConverter.ToInteger(arguments.At(0));
-
-            if (double.IsInfinity(x) || double.IsNaN(x))
-            {
-                return TypeConverter.ToString(x);
-            }
-
-            if (p < 1 || p > 21)
-            {
-                throw new JavaScriptException(Engine.RangeError, "precision must be between 1 and 21");
-            }
-
-            // Get the number of decimals
-            string str = x.ToString("e23", CultureInfo.InvariantCulture);
-            int decimals = str.IndexOfAny(new [] { '.', 'e' });
-            decimals = decimals == -1 ? str.Length : decimals;
-
-            p -= decimals;
-            p = p < 1 ? 1 : p;
-
-            return x.ToString("f" + p, CultureInfo.InvariantCulture);
+            return ni.NumberData;
         }
 
-        private JsValue ToNumberString(JsValue thisObject, JsValue[] arguments)
+        if (thisObject is JsNumber)
         {
-            if (!thisObject.IsNumber() && (thisObject.TryCast<NumberInstance>() == null))
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            var radix = arguments.At(0) == JsValue.Undefined ? 10 : (int) TypeConverter.ToInteger(arguments.At(0));
-
-            if (radix < 2 || radix > 36)
-            {
-                throw new JavaScriptException(Engine.RangeError, "radix must be between 2 and 36");
-            }
-
-            var x = TypeConverter.ToNumber(thisObject);
-
-            if (double.IsNaN(x))
-            {
-                return "NaN";
-            }
-
-            if (x.Equals(0))
-            {
-                return "0";
-            }
-
-            if (double.IsPositiveInfinity(x) || x >= double.MaxValue)
-            {
-                return "Infinity";
-            }
-
-            if (x < 0)
-            {
-                return "-" + ToNumberString(-x, arguments);
-            }
-
-            if (radix == 10)
-            {
-                return ToNumberString(x);    
-            }
-
-            var integer = (long) x;
-            var fraction = x -  integer;
-
-            string result = ToBase(integer, radix);
-            if (!fraction.Equals(0))
-            {
-                result += "." + ToFractionBase(fraction, radix);
-            }
-
-            return result;
+            return thisObject;
         }
 
-        public static string ToBase(long n, int radix)
+        ExceptionHelper.ThrowTypeError(_realm);
+        return null;
+    }
+
+    private const double Ten21 = 1e21;
+
+    private JsValue ToFixed(JsValue thisObject, JsCallArguments arguments)
+    {
+        var f = (int) TypeConverter.ToInteger(arguments.At(0, 0));
+        if (f < 0 || f > 100)
         {
-            const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-            if (n == 0)
-            {
-                return "0";
-            }
-
-            var result = new StringBuilder();
-            while (n > 0)
-            {
-                var digit = (int)(n % radix);
-                n = n / radix;
-                result.Insert(0, digits[digit].ToString());
-            }
-
-            return result.ToString();
+            ExceptionHelper.ThrowRangeError(_realm, "fractionDigits argument must be between 0 and 100");
         }
 
-        public static string ToFractionBase(double n, int radix)
+        // limitation with .NET, max is 99
+        if (f == 100)
         {
-            // based on the repeated multiplication method
-            // http://www.mathpath.org/concepts/Num/frac.htm
-
-            const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-            if (n.Equals(0))
-            {
-                return "0";
-            }
-
-            var result = new StringBuilder();
-            while (n > 0 && result.Length < 50) // arbitrary limit
-            {
-                var c = n*radix;
-                var d = (int) c;
-                n = c - d;
-
-                result.Append(digits[d].ToString());
-            }
-
-            return result.ToString();
+            ExceptionHelper.ThrowRangeError(_realm, "100 fraction digits is not supported due to .NET format specifier limitation");
         }
 
-        public static string ToNumberString(double m) 
+        var x = TypeConverter.ToNumber(thisObject);
+
+        if (double.IsNaN(x))
         {
-            if (double.IsNaN(m))
-            {
-                return "NaN";
-            }
-
-            if (m.Equals(0))
-            {
-                return "0";
-            }
-
-            if (double.IsPositiveInfinity(m) || m >= double.MaxValue)
-            {
-                return "Infinity";
-            }
-
-            if (m < 0)
-            {
-                return "-" + ToNumberString(-m);
-            }
-
-            // V8 FastDtoa can't convert all numbers, so try it first but
-            // fall back to old DToA in case it fails
-            var result = FastDtoa.NumberToString(m);
-            if (result != null)
-            {
-                return result;
-            }
-
-            // s is all digits (significand)
-            // k number of digits of s
-            // n total of digits in fraction s*10^n-k=m
-            // 123.4 s=1234, k=4, n=3
-            // 1234000 s = 1234, k=4, n=7
-            string s = null;
-            var rFormat = m.ToString("r", CultureInfo.InvariantCulture);
-            if (rFormat.IndexOf("e", StringComparison.OrdinalIgnoreCase) == -1)
-            {
-                s = rFormat.Replace(".", "").TrimStart('0').TrimEnd('0');
-            }
-        
-            const string format = "0.00000000000000000e0";
-            var parts = m.ToString(format, CultureInfo.InvariantCulture).Split('e');
-            if (s == null)
-            {
-                s = parts[0].TrimEnd('0').Replace(".", "");
-            }
-
-            var n = int.Parse(parts[1]) + 1;
-            var k = s.Length;
-            
-            if (k <= n && n <= 21)
-            {
-                return s + new string('0', n - k);
-            }
-
-            if (0 < n && n <= 21)
-            {
-                return s.Substring(0, n) + '.' + s.Substring(n);
-            }
-
-            if (-6 < n && n <= 0)
-            {
-                return "0." + new string('0', -n) + s;
-            }
-
-            if (k == 1)
-            {
-                return s + "e" + (n - 1 < 0 ? "-" : "+") + System.Math.Abs(n - 1);
-            }
-
-            return s.Substring(0, 1) + "." + s.Substring(1) + "e" + (n - 1 < 0 ? "-" : "+") + System.Math.Abs(n - 1);
+            return "NaN";
         }
+
+        if (x >= Ten21)
+        {
+            return ToNumberString(x);
+        }
+
+        // handle non-decimal with greater precision
+        if (System.Math.Abs(x - (long) x) < JsNumber.DoubleIsIntegerTolerance)
+        {
+            return ((long) x).ToString("f" + f, CultureInfo.InvariantCulture);
+        }
+
+        return x.ToString("f" + f, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// https://www.ecma-international.org/ecma-262/6.0/#sec-number.prototype.toexponential
+    /// </summary>
+    private JsValue ToExponential(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (!thisObject.IsNumber() && ReferenceEquals(thisObject.TryCast<NumberInstance>(), null))
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
+        }
+
+        var x = TypeConverter.ToNumber(thisObject);
+        var fractionDigits = arguments.At(0);
+        if (fractionDigits.IsUndefined())
+        {
+            fractionDigits = JsNumber.PositiveZero;
+        }
+
+        var f = (int) TypeConverter.ToInteger(fractionDigits);
+
+        if (double.IsNaN(x))
+        {
+            return "NaN";
+        }
+
+        if (double.IsInfinity(x))
+        {
+            return thisObject.ToString();
+        }
+
+        if (f < 0 || f > 100)
+        {
+            ExceptionHelper.ThrowRangeError(_realm, "fractionDigits argument must be between 0 and 100");
+        }
+
+        if (arguments.At(0).IsUndefined())
+        {
+            f = -1;
+        }
+
+        bool negative = false;
+        if (x < 0)
+        {
+            x = -x;
+            negative = true;
+        }
+
+        int decimalPoint;
+        var dtoaBuilder = new DtoaBuilder(stackalloc char[f == -1 ? SmallDtoaLength : LargeDtoaLength]);
+
+        if (f == -1)
+        {
+            DtoaNumberFormatter.DoubleToAscii(
+                ref dtoaBuilder,
+                x,
+                DtoaMode.Shortest,
+                requested_digits: 0,
+                out _,
+                out decimalPoint);
+            f = dtoaBuilder.Length - 1;
+        }
+        else
+        {
+            DtoaNumberFormatter.DoubleToAscii(
+                ref dtoaBuilder,
+                x,
+                DtoaMode.Precision,
+                requested_digits: f + 1,
+                out _,
+                out decimalPoint);
+        }
+
+        Debug.Assert(dtoaBuilder.Length > 0);
+        Debug.Assert(dtoaBuilder.Length <= f + 1);
+
+        int exponent = decimalPoint - 1;
+        var result = CreateExponentialRepresentation(ref dtoaBuilder, exponent, negative, f + 1);
+        return result;
+    }
+
+    private JsValue ToPrecision(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (!thisObject.IsNumber() && ReferenceEquals(thisObject.TryCast<NumberInstance>(), null))
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
+        }
+
+        var x = TypeConverter.ToNumber(thisObject);
+        var precisionArgument = arguments.At(0);
+
+        if (precisionArgument.IsUndefined())
+        {
+            return TypeConverter.ToString(x);
+        }
+
+        var p = (int) TypeConverter.ToInteger(precisionArgument);
+
+        if (double.IsNaN(x))
+        {
+            return "NaN";
+        }
+
+        if (double.IsInfinity(x))
+        {
+            return thisObject.ToString();
+        }
+
+        if (p < 1 || p > 100)
+        {
+            ExceptionHelper.ThrowRangeError(_realm, "precision must be between 1 and 100");
+        }
+
+        var dtoaBuilder = new DtoaBuilder(stackalloc char[LargeDtoaLength]);
+        DtoaNumberFormatter.DoubleToAscii(
+            ref dtoaBuilder,
+            x,
+            DtoaMode.Precision,
+            p,
+            out var negative,
+            out var decimalPoint);
+
+
+        int exponent = decimalPoint - 1;
+        if (exponent < -6 || exponent >= p)
+        {
+            return CreateExponentialRepresentation(ref dtoaBuilder, exponent, negative, p);
+        }
+
+        var sb = new ValueStringBuilder(stackalloc char[128]);
+
+        // Use fixed notation.
+        if (negative)
+        {
+            sb.Append('-');
+        }
+
+        if (decimalPoint <= 0)
+        {
+            sb.Append("0.");
+            sb.Append('0', -decimalPoint);
+            sb.Append(dtoaBuilder._chars.Slice(0, dtoaBuilder.Length));
+            sb.Append('0', p - dtoaBuilder.Length);
+        }
+        else
+        {
+            int m = System.Math.Min(dtoaBuilder.Length, decimalPoint);
+            sb.Append(dtoaBuilder._chars.Slice(0, m));
+            sb.Append('0', System.Math.Max(0, decimalPoint - dtoaBuilder.Length));
+            if (decimalPoint < p)
+            {
+                sb.Append('.');
+                var extra = negative ? 2 : 1;
+                if (dtoaBuilder.Length > decimalPoint)
+                {
+                    int len = dtoaBuilder.Length - decimalPoint;
+                    int n = System.Math.Min(len, p - (sb.Length - extra));
+                    sb.Append(dtoaBuilder._chars.Slice(decimalPoint, n));
+                }
+
+                sb.Append('0', System.Math.Max(0, extra + (p - sb.Length)));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static string CreateExponentialRepresentation(
+        ref DtoaBuilder buffer,
+        int exponent,
+        bool negative,
+        int significantDigits)
+    {
+        bool negativeExponent = false;
+        if (exponent < 0)
+        {
+            negativeExponent = true;
+            exponent = -exponent;
+        }
+
+        var sb = new ValueStringBuilder(stackalloc char[128]);
+        if (negative)
+        {
+            sb.Append('-');
+        }
+        sb.Append(buffer[0]);
+        if (significantDigits != 1)
+        {
+            sb.Append('.');
+            sb.Append(buffer.Slice(1, buffer.Length - 1));
+            int length = buffer.Length;
+            sb.Append('0', significantDigits - length);
+        }
+
+        sb.Append('e');
+        sb.Append(negativeExponent ? '-' : '+');
+        sb.Append(exponent);
+
+        return sb.ToString();
+    }
+
+    private JsValue ToNumberString(JsValue thisObject, JsCallArguments arguments)
+    {
+        if (!thisObject.IsNumber() && (ReferenceEquals(thisObject.TryCast<NumberInstance>(), null)))
+        {
+            ExceptionHelper.ThrowTypeError(_realm);
+        }
+
+        var radix = arguments.At(0).IsUndefined()
+            ? 10
+            : (int) TypeConverter.ToInteger(arguments.At(0));
+
+        if (radix < 2 || radix > 36)
+        {
+            ExceptionHelper.ThrowRangeError(_realm, "radix must be between 2 and 36");
+        }
+
+        var x = TypeConverter.ToNumber(thisObject);
+
+        if (double.IsNaN(x))
+        {
+            return "NaN";
+        }
+
+        if (x == 0)
+        {
+            return JsString.NumberZeroString;
+        }
+
+        if (double.IsPositiveInfinity(x) || x >= double.MaxValue)
+        {
+            return "Infinity";
+        }
+
+        if (x < 0)
+        {
+            return "-" + ToNumberString(-x, arguments);
+        }
+
+        if (radix == 10)
+        {
+            return ToNumberString(x);
+        }
+
+        var integer = (long) x;
+        var fraction = x - integer;
+
+        string result = NumberPrototype.ToBase(integer, radix);
+        if (fraction != 0)
+        {
+            result += "." + NumberPrototype.ToFractionBase(fraction, radix);
+        }
+
+        return result;
+    }
+
+    internal static string ToBase(long n, int radix)
+    {
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        if (n == 0)
+        {
+            return "0";
+        }
+
+        var sb = new ValueStringBuilder(stackalloc char[64]);
+        while (n > 0)
+        {
+            var digit = (int) (n % radix);
+            n /= radix;
+            sb.Append(Digits[digit]);
+        }
+        sb.Reverse();
+        return sb.ToString();
+    }
+
+    internal static string ToFractionBase(double n, int radix)
+    {
+        // based on the repeated multiplication method
+        // http://www.mathpath.org/concepts/Num/frac.htm
+
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        if (n == 0)
+        {
+            return "0";
+        }
+
+        var result = new ValueStringBuilder(stackalloc char[64]);
+        while (n > 0 && result.Length < 50) // arbitrary limit
+        {
+            var c = n * radix;
+            var d = (int) c;
+            n = c - d;
+
+            result.Append(Digits[d]);
+        }
+
+        return result.ToString();
+    }
+
+    internal static string ToNumberString(double m)
+    {
+        if (double.IsNaN(m))
+        {
+            return "NaN";
+        }
+
+        if (m == 0)
+        {
+            return "0";
+        }
+
+        if (double.IsInfinity(m))
+        {
+            return double.IsNegativeInfinity(m) ? "-Infinity" : "Infinity";
+        }
+
+        var builder = new DtoaBuilder(stackalloc char[SmallDtoaLength]);
+
+        DtoaNumberFormatter.DoubleToAscii(
+            ref builder,
+            m,
+            DtoaMode.Shortest,
+            0,
+            out var negative,
+            out var decimal_point);
+
+
+        var stringBuilder = new ValueStringBuilder(stackalloc char[64]);
+        if (negative)
+        {
+            stringBuilder.Append('-');
+        }
+
+        if (builder.Length <= decimal_point && decimal_point <= 21)
+        {
+            // ECMA-262 section 9.8.1 step 6.
+            stringBuilder.Append(builder._chars.Slice(0, builder.Length));
+            stringBuilder.Append('0', decimal_point - builder.Length);
+        }
+        else if (0 < decimal_point && decimal_point <= 21)
+        {
+            // ECMA-262 section 9.8.1 step 7.
+            stringBuilder.Append(builder._chars.Slice(0, decimal_point));
+            stringBuilder.Append('.');
+            stringBuilder.Append(builder._chars.Slice(decimal_point, builder.Length - decimal_point));
+        }
+        else if (decimal_point <= 0 && decimal_point > -6)
+        {
+            // ECMA-262 section 9.8.1 step 8.
+            stringBuilder.Append("0.");
+            stringBuilder.Append('0', -decimal_point);
+            stringBuilder.Append(builder._chars.Slice(0, builder.Length));
+        }
+        else
+        {
+            // ECMA-262 section 9.8.1 step 9 and 10 combined.
+            stringBuilder.Append(builder._chars[0]);
+            if (builder.Length != 1)
+            {
+                stringBuilder.Append('.');
+                stringBuilder.Append(builder._chars.Slice(1, builder.Length - 1));
+            }
+
+            stringBuilder.Append('e');
+            stringBuilder.Append((decimal_point >= 0) ? '+' : '-');
+            int exponent = decimal_point - 1;
+            if (exponent < 0)
+            {
+                exponent = -exponent;
+            }
+
+            stringBuilder.Append(exponent);
+        }
+
+        return stringBuilder.ToString();
     }
 }

@@ -1,36 +1,43 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿namespace Jint.Tests.Runtime.Domain;
 
-namespace Jint.Tests.Runtime.Domain
+public class Company : ICompany, IComparable<ICompany>
 {
-    public class Company : ICompany, IComparable<ICompany>
+    private string _name;
+
+    private readonly Dictionary<string, string> _dictionary = new Dictionary<string, string>()
     {
-        private string _name;
-        private readonly Dictionary<string, string> _dictionary = new Dictionary<string, string>();
+        {"key", "value"}
+    };
 
-        public Company(string name)
-        {
-            _name = name;
-        }
+    public Company(string name)
+    {
+        _name = name;
+    }
 
-        string ICompany.Name
-        {
-            get { return _name; }
-            set { _name = value; }
-        }
+    string ICompany.Name
+    {
+        get => _name;
+        set => _name = value;
+    }
 
-        string ICompany.this[string key]
-        {
-            get { return _dictionary[key]; }
-            set { _dictionary[key] = value; }
-        }
+    string ICompany.this[string key]
+    {
+        get => _dictionary[key];
+        set => _dictionary[key] = value;
+    }
 
-        int IComparable<ICompany>.CompareTo(ICompany other)
+    public string Item => "item thingie";
+
+    int IComparable<ICompany>.CompareTo(ICompany other)
+    {
+        return string.Compare(_name, other.Name, StringComparison.CurrentCulture);
+    }
+
+    public IEnumerable<char> GetNameChars()
+    {
+        foreach (var c in _name)
         {
-            return string.Compare(_name, other.Name, StringComparison.CurrentCulture);
+            yield return c;
         }
     }
 }

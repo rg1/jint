@@ -1,22 +1,22 @@
-﻿using Jint.Runtime;
+using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Native.Function
+namespace Jint.Native.Function;
+
+internal sealed class ThrowTypeError : Function
 {
-    public sealed class ThrowTypeError : FunctionInstance
+    public ThrowTypeError(Engine engine, Realm realm)
+        : base(engine, realm, null)
     {
-        private readonly Engine _engine;
+        _length = PropertyDescriptor.AllForbiddenDescriptor.NumberZero;
+        _nameDescriptor = new PropertyDescriptor(JsString.Empty, PropertyFlag.AllForbidden);
+        _environment = realm.GlobalEnv;
+        PreventExtensions();
+    }
 
-        public ThrowTypeError(Engine engine): base(engine, new string[0], engine.GlobalEnvironment, false)
-        {
-            _engine = engine;
-            DefineOwnProperty("length", new PropertyDescriptor(0, false, false, false), false);
-            Extensible = false;
-        }
-
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            throw new JavaScriptException(_engine.TypeError);
-        }
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        ExceptionHelper.ThrowTypeError(_realm);
+        return null;
     }
 }

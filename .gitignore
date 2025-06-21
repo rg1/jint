@@ -158,3 +158,11 @@ Jint.sln.ide/*
 .vs
 project.lock.json
 .build
+
+.idea
+BenchmarkDotNet.Artifacts*
+.vscode
+
+# generated code
+Jint.Tests.Test262/Generated
+/artifacts
