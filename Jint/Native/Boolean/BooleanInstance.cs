@@ -1,33 +1,19 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
 
-namespace Jint.Native.Boolean
+namespace Jint.Native.Boolean;
+
+internal class BooleanInstance : ObjectInstance, IJsPrimitive
 {
-    public class BooleanInstance : ObjectInstance, IPrimitiveInstance
+    public BooleanInstance(Engine engine, JsBoolean value)
+        : base(engine, ObjectClass.Boolean)
     {
-        public BooleanInstance(Engine engine)
-            : base(engine)
-        {
-        }
-
-        public override string Class
-        {
-            get
-            {
-                return "Boolean";
-            }
-        }
-
-        Types IPrimitiveInstance.Type
-        {
-            get { return Types.Boolean; }
-        }
-
-        JsValue IPrimitiveInstance.PrimitiveValue
-        {
-            get { return PrimitiveValue; }
-        }
-
-        public JsValue PrimitiveValue { get; set; }
+        BooleanData = value;
     }
+
+    Types IJsPrimitive.Type => Types.Boolean;
+
+    JsValue IJsPrimitive.PrimitiveValue => BooleanData;
+
+    public JsBoolean BooleanData { get; }
 }

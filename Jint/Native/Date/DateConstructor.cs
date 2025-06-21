@@ -1,170 +1,161 @@
-﻿using System;
-using System.Globalization;
+#pragma warning disable CA1859 // Use concrete types when possible for improved performance -- most of constructor methods return JsValue
+
 using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.Date
+namespace Jint.Native.Date;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-date-constructor
+/// </summary>
+internal sealed class DateConstructor : Constructor
 {
-    public sealed class DateConstructor : FunctionInstance, IConstructor
+    internal static readonly DateTime Epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly JsString _functionName = new JsString("Date");
+    private readonly ITimeSystem _timeSystem;
+
+    internal DateConstructor(
+        Engine engine,
+        Realm realm,
+        FunctionPrototype functionPrototype,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        internal static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        _prototype = functionPrototype;
+        PrototypeObject = new DatePrototype(engine, this, objectPrototype);
+        _length = new PropertyDescriptor(7, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+        _timeSystem = engine.Options.TimeSystem;
+    }
 
-        public DateConstructor(Engine engine) : base(engine, null, null, false)
+    internal DatePrototype PrototypeObject { get; }
+
+    protected override void Initialize()
+    {
+        const PropertyFlag LengthFlags = PropertyFlag.Configurable;
+        const PropertyFlag PropertyFlags = PropertyFlag.Configurable | PropertyFlag.Writable;
+
+        var properties = new PropertyDictionary(3, checkExistingKeys: false)
         {
+            ["parse"] = new(new ClrFunction(Engine, "parse", Parse, 1, LengthFlags), PropertyFlags),
+            ["UTC"] = new(new ClrFunction(Engine, "UTC", Utc, 7, LengthFlags), PropertyFlags),
+            ["now"] = new(new ClrFunction(Engine, "now", Now, 0, LengthFlags), PropertyFlags)
+        };
+        SetProperties(properties);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-date.parse
+    /// </summary>
+    private JsValue Parse(JsValue thisObject, JsCallArguments arguments)
+    {
+        var dateString = TypeConverter.ToString(arguments.At(0));
+        var date = ParseFromString(dateString);
+        return date.ToJsValue();
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-date.parse
+    /// </summary>
+    private DatePresentation ParseFromString(string date)
+    {
+        if (_timeSystem.TryParse(date, out var result))
+        {
+            return result;
         }
 
-        public static DateConstructor CreateDateConstructor(Engine engine)
+        // unrecognized dates should return NaN
+        return DatePresentation.NaN;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-date.utc
+    /// </summary>
+    private static JsValue Utc(JsValue thisObject, JsCallArguments arguments)
+    {
+        var y = TypeConverter.ToNumber(arguments.At(0));
+        var m = TypeConverter.ToNumber(arguments.At(1, JsNumber.PositiveZero));
+        var dt = TypeConverter.ToNumber(arguments.At(2, JsNumber.PositiveOne));
+        var h = TypeConverter.ToNumber(arguments.At(3, JsNumber.PositiveZero));
+        var min = TypeConverter.ToNumber(arguments.At(4, JsNumber.PositiveZero));
+        var s = TypeConverter.ToNumber(arguments.At(5, JsNumber.PositiveZero));
+        var milli = TypeConverter.ToNumber(arguments.At(6, JsNumber.PositiveZero));
+
+        var yInteger = TypeConverter.ToInteger(y);
+        if (!double.IsNaN(y) && 0 <= yInteger && yInteger <= 99)
         {
-            var obj = new DateConstructor(engine);
-            obj.Extensible = true;
-
-            // The value of the [[Prototype]] internal property of the Date constructor is the Function prototype object 
-            obj.Prototype = engine.Function.PrototypeObject;
-            obj.PrototypeObject = DatePrototype.CreatePrototypeObject(engine, obj);
-
-            obj.FastAddProperty("length", 7, false, false, false);
-
-            // The initial value of Date.prototype is the Date prototype object
-            obj.FastAddProperty("prototype", obj.PrototypeObject, false, false, false);
-
-            return obj;
+            y = yInteger + 1900;
         }
 
-        public void Configure()
+        var finalDate = DatePrototype.MakeDate(
+            DatePrototype.MakeDay(y, m, dt),
+            DatePrototype.MakeTime(h, min, s, milli));
+
+        return finalDate.TimeClip().ToJsValue();
+    }
+
+    private JsValue Now(JsValue thisObject, JsCallArguments arguments)
+    {
+        return (long) (_timeSystem.GetUtcNow().DateTime - Epoch).TotalMilliseconds;
+    }
+
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        return PrototypeObject.ToString(Construct(Arguments.Empty, thisObject), Arguments.Empty);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-date
+    /// </summary>
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        // fast path is building default, new Date()
+        if (arguments.Length == 0 || newTarget.IsUndefined())
         {
-            FastAddProperty("parse", new ClrFunctionInstance(Engine, Parse, 1), true, false, true);
-            FastAddProperty("UTC", new ClrFunctionInstance(Engine, Utc, 7), true, false, true);
-            FastAddProperty("now", new ClrFunctionInstance(Engine, Now, 0), true, false, true);
+            return OrdinaryCreateFromConstructor(
+                newTarget,
+                static intrinsics => intrinsics.Date.PrototypeObject,
+                static (engine, _, dateValue) => new JsDate(engine, dateValue),
+                (_timeSystem.GetUtcNow().DateTime - Epoch).TotalMilliseconds);
         }
 
-        private JsValue Parse(JsValue thisObj, JsValue[] arguments)
-        {
-            DateTime result;
-            var date = TypeConverter.ToString(arguments.At(0));
+        return ConstructUnlikely(arguments, newTarget);
+    }
 
-            if (!DateTime.TryParseExact(date, new[]
+    private JsDate ConstructUnlikely(JsCallArguments arguments, JsValue newTarget)
+    {
+        DatePresentation dv;
+        if (arguments.Length == 1)
+        {
+            if (arguments[0] is JsDate date)
             {
-                "yyyy-MM-ddTHH:mm:ss.FFF",
-                "yyyy-MM-ddTHH:mm:ss",
-                "yyyy-MM-ddTHH:mm",
-                "yyyy-MM-dd",
-                "yyyy-MM",
-                "yyyy"
-            }, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out result))
-            {
-                if (!DateTime.TryParseExact(date, new[]
-                {
-                    // Formats used in DatePrototype toString methods
-                    "ddd MMM dd yyyy HH:mm:ss 'GMT'K",
-                    "ddd MMM dd yyyy",
-                    "HH:mm:ss 'GMT'K",
-
-                    // standard formats
-                    "yyyy-M-dTH:m:s.FFFK",
-                    "yyyy/M/dTH:m:s.FFFK",
-                    "yyyy-M-dTH:m:sK",
-                    "yyyy/M/dTH:m:sK",
-                    "yyyy-M-dTH:mK",
-                    "yyyy/M/dTH:mK",
-                    "yyyy-M-d H:m:s.FFFK",
-                    "yyyy/M/d H:m:s.FFFK",
-                    "yyyy-M-d H:m:sK",
-                    "yyyy/M/d H:m:sK",
-                    "yyyy-M-d H:mK",
-                    "yyyy/M/d H:mK",
-                    "yyyy-M-dK",
-                    "yyyy/M/dK",
-                    "yyyy-MK",
-                    "yyyy/MK",
-                    "yyyyK",
-                    "THH:mm:ss.FFFK",
-                    "THH:mm:ssK",
-                    "THH:mmK",
-                    "THHK"
-                }, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out result))
-                {
-                    if (!DateTime.TryParse(date, Engine.Options._Culture, DateTimeStyles.AdjustToUniversal, out result))
-                    {
-                        if (!DateTime.TryParse(date, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out result))
-                        {
-                            // unrecognized dates should return NaN (15.9.4.2)
-                            return double.NaN;
-                        }
-                    }
-                }
+                return Construct(date._dateValue);
             }
 
-            return FromDateTime(result);
-        }
-
-        private JsValue Utc(JsValue thisObj, JsValue[] arguments)
-        {
-            return TimeClip(ConstructTimeValue(arguments, useUtc: true));
-        }
-
-        private JsValue Now(JsValue thisObj, JsValue[] arguments)
-        {
-            return System.Math.Floor((DateTime.UtcNow - Epoch).TotalMilliseconds);
-        }
-
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            return PrototypeObject.ToString(Construct(Arguments.Empty), Arguments.Empty);
-        }
-
-        /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-15.9.3
-        /// </summary>
-        /// <param name="arguments"></param>
-        /// <returns></returns>
-        public ObjectInstance Construct(JsValue[] arguments)
-        {
-            if (arguments.Length == 0)
+            var v = TypeConverter.ToPrimitive(arguments[0]);
+            if (v.IsString())
             {
-                return Construct(DateTime.UtcNow);
-            }
-            else if (arguments.Length == 1)
-            {
-                var v = TypeConverter.ToPrimitive(arguments[0]);
-                if (v.IsString())
-                {
-                    return Construct(Parse(Undefined.Instance, Arguments.From(v)).AsNumber());
-                }
-
-                return Construct(TypeConverter.ToNumber(v));
-            }
-            else
-            {
-                return Construct(ConstructTimeValue(arguments, useUtc: false));
-            }
-        }
-
-        private double ConstructTimeValue(JsValue[] arguments, bool useUtc)
-        {
-            if (arguments.Length < 2)
-            {
-                throw new ArgumentOutOfRangeException("arguments", "There must be at least two arguments.");
+                var value = ParseFromString(v.ToString());
+                return Construct(value);
             }
 
-            var y = TypeConverter.ToNumber(arguments[0]);
-            var m = (int)TypeConverter.ToInteger(arguments[1]);
-            var dt = arguments.Length > 2 ? (int)TypeConverter.ToInteger(arguments[2]) : 1;
-            var h = arguments.Length > 3 ? (int)TypeConverter.ToInteger(arguments[3]) : 0;
-            var min = arguments.Length > 4 ? (int)TypeConverter.ToInteger(arguments[4]) : 0;
-            var s = arguments.Length > 5 ? (int)TypeConverter.ToInteger(arguments[5]) : 0;
-            var milli = arguments.Length > 6 ? (int)TypeConverter.ToInteger(arguments[6]) : 0;
+            dv = TypeConverter.ToNumber(v);
+        }
+        else
+        {
+            var y = TypeConverter.ToNumber(arguments.At(0));
+            var m = TypeConverter.ToNumber(arguments.At(1));
+            var dt = TypeConverter.ToNumber(arguments.At(2, JsNumber.PositiveOne));
+            var h = TypeConverter.ToNumber(arguments.At(3, JsNumber.PositiveZero));
+            var min = TypeConverter.ToNumber(arguments.At(4, JsNumber.PositiveZero));
+            var s = TypeConverter.ToNumber(arguments.At(5, JsNumber.PositiveZero));
+            var milli = TypeConverter.ToNumber(arguments.At(6, JsNumber.PositiveZero));
 
-            for (int i = 2; i < arguments.Length; i++)
-            {
-                if (double.IsNaN(TypeConverter.ToNumber(arguments[i])))
-                {
-                    return double.NaN;
-                }
-            }
-
-            if ((!double.IsNaN(y)) && (0 <= TypeConverter.ToInteger(y)) && (TypeConverter.ToInteger(y) <= 99))
+            var yInteger = TypeConverter.ToInteger(y);
+            if (!double.IsNaN(y) && 0 <= yInteger && yInteger <= 99)
             {
                 y += 1900;
             }
@@ -173,71 +164,72 @@ namespace Jint.Native.Date
                 DatePrototype.MakeDay(y, m, dt),
                 DatePrototype.MakeTime(h, min, s, milli));
 
-            return TimeClip(useUtc ? finalDate : PrototypeObject.Utc(finalDate));
+            dv = PrototypeObject.Utc(finalDate).TimeClip();
         }
 
-        public DatePrototype PrototypeObject { get; private set; }
-
-        public DateInstance Construct(DateTimeOffset value)
-        {
-            return Construct(value.UtcDateTime);
-        }
-
-        public DateInstance Construct(DateTime value)
-        {
-            var instance = new DateInstance(Engine)
-                {
-                    Prototype = PrototypeObject,
-                    PrimitiveValue = FromDateTime(value),
-                    Extensible = true
-                };
-
-            return instance;
-        }
-
-        public DateInstance Construct(double time)
-        {
-            var instance = new DateInstance(Engine)
-                {
-                    Prototype = PrototypeObject,
-                    PrimitiveValue = TimeClip(time),
-                    Extensible = true
-                };
-
-            return instance;
-        }
-
-        public static double TimeClip(double time)
-        {
-            if (double.IsInfinity(time) || double.IsNaN(time))
-            {
-                return double.NaN;
-            }
-
-            if (System.Math.Abs(time) > 8640000000000000)
-            {
-                return double.NaN;
-            }
-
-            return TypeConverter.ToInteger(time);
-        }
-
-        public double FromDateTime(DateTime dt)
-        {
-            var convertToUtcAfter = (dt.Kind == DateTimeKind.Unspecified);
-
-            var dateAsUtc = dt.Kind == DateTimeKind.Local
-                ? dt.ToUniversalTime()
-                : DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-
-            var result = (dateAsUtc - Epoch).TotalMilliseconds;
-
-            if (convertToUtcAfter)
-            {
-                result = PrototypeObject.Utc(result);
-            }
-
-            return System.Math.Floor(result);
-        }
+        return OrdinaryCreateFromConstructor(
+            newTarget,
+            static intrinsics => intrinsics.Date.PrototypeObject,
+            static (engine, _, dateValue) => new JsDate(engine, dateValue), dv);
     }
+
+    public JsDate Construct(DateTimeOffset value) => Construct(value.UtcDateTime);
+
+    public JsDate Construct(DateTime value) => Construct(FromDateTime(value));
+
+    public JsDate Construct(long time)
+    {
+        return OrdinaryCreateFromConstructor(
+            Undefined,
+            static intrinsics => intrinsics.Date.PrototypeObject,
+            static (engine, _, dateValue) => new JsDate(engine, dateValue), time);
+    }
+
+    private JsDate Construct(DatePresentation time)
+    {
+        return OrdinaryCreateFromConstructor(
+            Undefined,
+            static intrinsics => intrinsics.Date.PrototypeObject,
+            static (engine, _, dateValue) => new JsDate(engine, dateValue), time);
+    }
+
+    internal DatePresentation FromDateTime(DateTime dt, bool negative = false)
+    {
+        if (dt == DateTime.MinValue)
+        {
+            return DatePresentation.MinValue;
+        }
+
+        if (dt == DateTime.MaxValue)
+        {
+            return DatePresentation.MaxValue;
+        }
+
+        var convertToUtcAfter = dt.Kind == DateTimeKind.Unspecified;
+
+        var dateAsUtc = dt.Kind == DateTimeKind.Local
+            ? dt.ToUniversalTime()
+            : DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+
+        DatePresentation result;
+        if (negative)
+        {
+            result = DatePrototype.MakeDate(
+                DatePrototype.MakeDay(-1 * dateAsUtc.Year, dateAsUtc.Month - 1, dateAsUtc.Day),
+                DatePrototype.MakeTime(dateAsUtc.Hour, dateAsUtc.Minute, dateAsUtc.Second, dateAsUtc.Millisecond)
+            );
+        }
+        else
+        {
+            result = (long) (dateAsUtc - Epoch).TotalMilliseconds;
+        }
+
+        if (convertToUtcAfter)
+        {
+            result = PrototypeObject.Utc(result);
+        }
+
+        return result;
+    }
+
 }

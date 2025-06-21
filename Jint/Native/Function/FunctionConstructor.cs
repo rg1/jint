@@ -1,196 +1,136 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using Jint.Native.Object;
-using Jint.Native.String;
-using Jint.Parser;
-using Jint.Parser.Ast;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
 using Jint.Runtime.Environments;
+using Jint.Runtime.Interpreter;
+using Environment = Jint.Runtime.Environments.Environment;
 
-namespace Jint.Native.Function
+namespace Jint.Native.Function;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-function-constructor
+/// </summary>
+public sealed class FunctionConstructor : Constructor
 {
-    public sealed class FunctionConstructor : FunctionInstance, IConstructor
+    private static readonly JsString _functionName = new JsString("Function");
+
+    internal FunctionConstructor(
+        Engine engine,
+        Realm realm,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        private FunctionConstructor(Engine engine):base(engine, null, null, false)
+        PrototypeObject = new FunctionPrototype(engine, realm, objectPrototype);
+        _prototype = PrototypeObject;
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+        _length = new PropertyDescriptor(JsNumber.PositiveOne, PropertyFlag.Configurable);
+    }
+
+    internal FunctionPrototype PrototypeObject { get; }
+
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        return Construct(arguments, thisObject);
+    }
+
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        var function = CreateDynamicFunction(
+            this,
+            newTarget,
+            FunctionKind.Normal,
+            arguments);
+
+        return function;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiatefunctionobject
+    /// </summary>
+    internal Function InstantiateFunctionObject(
+        JintFunctionDefinition functionDeclaration,
+        Environment scope,
+        PrivateEnvironment? privateEnv)
+    {
+        var function = functionDeclaration.Function;
+        if (!function.Generator)
         {
+            return function.Async
+                ? InstantiateAsyncFunctionObject(functionDeclaration, scope, privateEnv)
+                : InstantiateOrdinaryFunctionObject(functionDeclaration, scope, privateEnv);
         }
-
-        public static FunctionConstructor CreateFunctionConstructor(Engine engine)
+        else
         {
-            var obj = new FunctionConstructor(engine);
-            obj.Extensible = true;
-
-            // The initial value of Function.prototype is the standard built-in Function prototype object
-            obj.PrototypeObject = FunctionPrototype.CreatePrototypeObject(engine);
-            
-            // The value of the [[Prototype]] internal property of the Function constructor is the standard built-in Function prototype object 
-            obj.Prototype = obj.PrototypeObject;
-            
-            obj.FastAddProperty("prototype", obj.PrototypeObject, false, false, false);
-
-            obj.FastAddProperty("length", 1, false, false, false);
-
-            return obj;
+            return InstantiateGeneratorFunctionObject(functionDeclaration, scope, privateEnv);
         }
+    }
 
-        public void Configure()
-        {
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiateasyncfunctionobject
+    /// </summary>
+    private ScriptFunction InstantiateAsyncFunctionObject(
+        JintFunctionDefinition functionDeclaration,
+        Environment env,
+        PrivateEnvironment? privateEnv)
+    {
+        var F = OrdinaryFunctionCreate(
+            _realm.Intrinsics.AsyncFunction.PrototypeObject,
+            functionDeclaration,
+            functionDeclaration.ThisMode,
+            env,
+            privateEnv);
 
-        }
+        F.SetFunctionName(functionDeclaration.Name ?? "default");
 
-        public FunctionPrototype PrototypeObject { get; private set; }
+        return F;
+    }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            return Construct(arguments);
-        }
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiateordinaryfunctionobject
+    /// </summary>
+    private ScriptFunction InstantiateOrdinaryFunctionObject(
+        JintFunctionDefinition functionDeclaration,
+        Environment env,
+        PrivateEnvironment? privateEnv)
+    {
+        var F = OrdinaryFunctionCreate(
+            _realm.Intrinsics.Function.PrototypeObject,
+            functionDeclaration,
+            functionDeclaration.ThisMode,
+            env,
+            privateEnv);
 
-        private string[] ParseArgumentNames(string parameterDeclaration)
-        {
-            string[] values = parameterDeclaration.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        var name = functionDeclaration.Name ?? "default";
+        F.SetFunctionName(name);
+        F.MakeConstructor();
+        return F;
+    }
 
-            var newValues = new string[values.Length];
-            for (var i = 0; i < values.Length; i++)
-            {
-                newValues[i] = StringPrototype.TrimEx(values[i]);
-            }
-            return newValues;
-        }
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiategeneratorfunctionobject
+    /// </summary>
+    private ScriptFunction InstantiateGeneratorFunctionObject(
+        JintFunctionDefinition functionDeclaration,
+        Environment scope,
+        PrivateEnvironment? privateScope)
+    {
+        var thisMode = functionDeclaration.Strict || _engine._isStrict
+            ? FunctionThisMode.Strict
+            : FunctionThisMode.Global;
 
-        public ObjectInstance Construct(JsValue[] arguments)
-        {
-            var argCount = arguments.Length;
-            string p = "";
-            string body = "";
+        var name = functionDeclaration.Function.Id?.Name ?? "default";
+        var F = OrdinaryFunctionCreate(
+            _realm.Intrinsics.GeneratorFunction.PrototypeObject,
+            functionDeclaration,
+            thisMode,
+            scope,
+            privateScope);
 
-            if (argCount == 1)
-            {
-                body = TypeConverter.ToString(arguments[0]);
-            }
-            else if (argCount > 1)
-            {
-                var firstArg = arguments[0];
-                p = TypeConverter.ToString(firstArg);
-                for (var k = 1; k < argCount - 1; k++)
-                {
-                    var nextArg = arguments[k];
-                    p += "," + TypeConverter.ToString(nextArg);
-                }
+        F.SetFunctionName(name);
 
-                body = TypeConverter.ToString(arguments[argCount-1]);
-            }
-            
-            var parameters = this.ParseArgumentNames(p);
-            var parser = new JavaScriptParser();
-            FunctionExpression function;
-            try
-            {
-                var functionExpression = "function(" + p + ") { " + body + "}";
-                function = parser.ParseFunctionExpression(functionExpression); 
-            }
-            catch (ParserException)
-            {
-                throw new JavaScriptException(Engine.SyntaxError);
-            }
+        var prototype = OrdinaryObjectCreate(_engine, _realm.Intrinsics.GeneratorFunction.PrototypeObject.PrototypeObject);
+        F.DefinePropertyOrThrow(CommonProperties.Prototype, new PropertyDescriptor(prototype, PropertyFlag.Writable));
 
-            // todo: check if there is not a way to use the FunctionExpression directly instead of creating a FunctionDeclaration
-            var functionObject = new ScriptFunctionInstance(
-                Engine,
-                new FunctionDeclaration
-                    {
-                        Type = SyntaxNodes.FunctionDeclaration,
-                        Body = new BlockStatement
-                            {
-                                Type = SyntaxNodes.BlockStatement,
-                                Body = new [] { function.Body }
-                            },
-                        Parameters = parameters.Select(x => new Identifier
-                            {
-                                Type = SyntaxNodes.Identifier,
-                                Name = x
-                            }).ToArray(),
-                        FunctionDeclarations = function.FunctionDeclarations,
-                        VariableDeclarations = function.VariableDeclarations
-                    },  
-                LexicalEnvironment.NewDeclarativeEnvironment(Engine, Engine.ExecutionContext.LexicalEnvironment),
-                function.Strict
-                ) { Extensible = true };
-
-            return functionObject;
-            
-        }
-
-        /// <summary>
-        /// http://www.ecma-international.org/ecma-262/5.1/#sec-13.2
-        /// </summary>
-        /// <param name="functionDeclaration"></param>
-        /// <returns></returns>
-        public FunctionInstance CreateFunctionObject(FunctionDeclaration functionDeclaration)
-        {
-            var functionObject = new ScriptFunctionInstance(
-                Engine,
-                functionDeclaration,
-                LexicalEnvironment.NewDeclarativeEnvironment(Engine, Engine.ExecutionContext.LexicalEnvironment),
-                functionDeclaration.Strict
-                ) { Extensible = true };
-
-            return functionObject;
-        }
-
-        private FunctionInstance _throwTypeError;
-
-        public FunctionInstance ThrowTypeError
-        {
-            get
-            {
-                if (_throwTypeError != null)
-                {
-                    return _throwTypeError;
-                }
-
-                _throwTypeError = new ThrowTypeError(Engine);
-                return _throwTypeError;
-            }
-        }
-
-        public object Apply(JsValue thisObject, JsValue[] arguments)
-        {
-            if (arguments.Length != 2)
-            {
-                throw new ArgumentException("Apply has to be called with two arguments.");
-            }
-
-            var func = thisObject.TryCast<ICallable>();
-            var thisArg = arguments[0];
-            var argArray = arguments[1];
-
-            if (func == null)
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            if (argArray == Null.Instance || argArray == Undefined.Instance)
-            {
-                return func.Call(thisArg, Arguments.Empty);
-            }
-
-            var argArrayObj = argArray.TryCast<ObjectInstance>();
-            if (argArrayObj == null)
-            {
-                throw new JavaScriptException(Engine.TypeError);
-            }
-
-            var len = argArrayObj.Get("length");
-            var n = TypeConverter.ToUint32(len);
-            var argList = new List<JsValue>();
-            for (var index = 0; index < n; index++)
-            {
-                var indexName = index.ToString();
-                var nextArg = argArrayObj.Get(indexName);
-                argList.Add(nextArg);
-            }
-            return func.Call(thisArg, argList.ToArray());
-        }
+        return F;
     }
 }

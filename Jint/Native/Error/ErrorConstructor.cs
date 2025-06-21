@@ -1,59 +1,104 @@
-﻿using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Descriptors;
+using Jint.Runtime.Interop;
 
-namespace Jint.Native.Error
+namespace Jint.Native.Error;
+
+public sealed class ErrorConstructor : Constructor
 {
-    public class ErrorConstructor : FunctionInstance, IConstructor
+    private readonly Func<Intrinsics, ObjectInstance> _intrinsicDefaultProto;
+
+    internal ErrorConstructor(
+        Engine engine,
+        Realm realm,
+        ObjectInstance functionPrototype,
+        ObjectInstance objectPrototype,
+        JsString name, Func<Intrinsics, ObjectInstance> intrinsicDefaultProto)
+        : base(engine, realm, name)
     {
-        private string _name;
+        _intrinsicDefaultProto = intrinsicDefaultProto;
+        _prototype = functionPrototype;
+        PrototypeObject = new ErrorPrototype(engine, realm, this, objectPrototype, name);
+        _length = new PropertyDescriptor(JsNumber.PositiveOne, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+    }
 
-        public ErrorConstructor(Engine engine) : base(engine, null, null, false)
+    internal ErrorPrototype PrototypeObject { get; }
+
+    protected override void Initialize()
+    {
+        var properties = new PropertyDictionary(3, checkExistingKeys: false)
         {
+            ["isError"] = new PropertyDescriptor(new PropertyDescriptor(new ClrFunction(Engine, "isError", IsError, 1), PropertyFlag.NonEnumerable)),
+        };
+        SetProperties(properties);
+    }
+
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
+    {
+        return Construct(arguments, this);
+    }
+
+    public ObjectInstance Construct(string? message = null)
+    {
+        return Construct(message != null ? [message] : [], this);
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-nativeerror
+    /// </summary>
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        var o = OrdinaryCreateFromConstructor(
+            newTarget,
+            _intrinsicDefaultProto,
+            static (Engine engine, Realm _, object? _) => new JsError(engine));
+
+        var jsValue = arguments.At(0);
+        if (!jsValue.IsUndefined())
+        {
+            var msg = TypeConverter.ToJsString(jsValue);
+            o.CreateNonEnumerableDataPropertyOrThrow(CommonProperties.Message, msg);
         }
 
-        public static ErrorConstructor CreateErrorConstructor(Engine engine, string name)
+        var stackString = BuildStackString();
+        if (stackString is not null)
         {
-            var obj = new ErrorConstructor(engine);
-            obj.Extensible = true;
-            obj._name = name;
-
-            // The value of the [[Prototype]] internal property of the Error constructor is the Function prototype object (15.11.3)
-            obj.Prototype = engine.Function.PrototypeObject;
-            obj.PrototypeObject = ErrorPrototype.CreatePrototypeObject(engine, obj, name);
-
-            obj.FastAddProperty("length", 1, false, false, false);
-
-            // The initial value of Error.prototype is the Error prototype object
-            obj.FastAddProperty("prototype", obj.PrototypeObject, false, false, false);
-
-            return obj;
+            var stackDesc = new PropertyDescriptor(stackString, PropertyFlag.NonEnumerable);
+            o.DefinePropertyOrThrow(CommonProperties.Stack, stackDesc);
         }
 
-        public void Configure()
+        var options = arguments.At(1);
+        if (!options.IsUndefined())
         {
-            
+            o.InstallErrorCause(options);
         }
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
-        {
-            return Construct(arguments);
-        }
+        return o;
 
-        public ObjectInstance Construct(JsValue[] arguments)
+        JsValue? BuildStackString()
         {
-            var instance = new ErrorInstance(Engine, _name);
-            instance.Prototype = PrototypeObject;
-            instance.Extensible = true;
-
-            if (arguments.At(0) != Undefined.Instance)
+            var lastSyntaxNode = _engine.GetLastSyntaxElement();
+            if (lastSyntaxNode == null)
             {
-                instance.Put("message", TypeConverter.ToString(arguments.At(0)), false);
+                return null;
             }
 
-            return instance;
-        }
+            var callStack = _engine.CallStack;
+            var currentFunction = callStack.TryPeek(out var element) ? element.Function : null;
 
-        public ErrorPrototype PrototypeObject { get; private set; }
+            // If the current function is the ErrorConstructor itself (i.e. "throw new Error(...)" was called
+            // from script), exclude it from the stack trace, because the trace should begin at the throw point.
+            return callStack.BuildCallStackString(_engine, lastSyntaxNode.Location, currentFunction == this ? 1 : 0);
+        }
+    }
+
+    /// <summary>
+    /// https://tc39.es/proposal-is-error/
+    /// </summary>
+    private static JsValue IsError(JsValue? thisObj, JsCallArguments arguments)
+    {
+        return arguments.At(0) is JsError;
     }
 }

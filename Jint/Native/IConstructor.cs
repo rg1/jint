@@ -1,10 +1,8 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 
-namespace Jint.Native
+namespace Jint.Native;
+
+internal interface IConstructor
 {
-    public interface IConstructor
-    {
-        JsValue Call(JsValue thisObject, JsValue[] arguments);
-        ObjectInstance Construct(JsValue[] arguments);
-    }
+    ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget);
 }

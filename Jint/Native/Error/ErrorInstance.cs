@@ -1,27 +1,29 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
 
-namespace Jint.Native.Error
+namespace Jint.Native.Error;
+
+public class ErrorInstance : ObjectInstance
 {
-    public class ErrorInstance : ObjectInstance
+    private protected ErrorInstance(Engine engine, ObjectClass objectClass)
+        : base(engine, objectClass)
     {
-        public ErrorInstance(Engine engine, string name)
-            : base(engine)
-        {
-            FastAddProperty("name", name, true, false, true);
-        }
+    }
 
-        public override string Class
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-installerrorcause
+    /// </summary>
+    internal void InstallErrorCause(JsValue options)
+    {
+        if (options is ObjectInstance oi && oi.HasProperty("cause"))
         {
-            get
-            {
-                return "Error";
-            }
+            var cause = oi.Get("cause");
+            CreateNonEnumerableDataPropertyOrThrow("cause", cause);
         }
+    }
 
-        public override string ToString()
-        {
-            return Engine.Error.PrototypeObject.ToString(this, Arguments.Empty).ToObject().ToString();
-        }
+    public override string ToString()
+    {
+        return Engine.Realm.Intrinsics.Error.PrototypeObject.ToString(this, Arguments.Empty).ToObject()?.ToString() ?? "";
     }
 }
